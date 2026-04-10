@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Form
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr
 from app.database import get_db
@@ -6,7 +6,7 @@ from app.auth.utils import hash_password, verify_password, create_access_token, 
 import uuid
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/token")
 
 # --- Schemas ---
 class RegisterRequest(BaseModel):
@@ -17,10 +17,6 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
-
-class TokenResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
 
 # --- Get current user ---
 def get_current_user(token: str = Depends(oauth2_scheme)):
@@ -33,16 +29,14 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
 @router.post("/register")
 def register(req: RegisterRequest):
     db = get_db()
-    
-    # Check if email exists
+
     existing = db.table("tenants").select("id").eq("email", req.email).execute()
     if existing.data:
         raise HTTPException(status_code=400, detail="Email already registered")
-    
-    # Create tenant
+
     tenant_id = str(uuid.uuid4())
     hashed = hash_password(req.password)
-    
+
     db.table("tenants").insert({
         "id": tenant_id,
         "name": req.name,
@@ -55,34 +49,57 @@ def register(req: RegisterRequest):
         "retention_days": 7,
         "password_hash": hashed
     }).execute()
-    
+
     token = create_access_token({
         "sub": tenant_id,
         "email": req.email,
         "plan": "starter"
     })
-    
+
     return {"access_token": token, "token_type": "bearer", "tenant_id": tenant_id}
 
-@router.post("/login")
-def login(req: LoginRequest):
+# --- Swagger UI login (OAuth2 form) ---
+@router.post("/token")
+def token(form_data: OAuth2PasswordRequestForm = Depends()):
     db = get_db()
-    
-    result = db.table("tenants").select("*").eq("email", req.email).execute()
+
+    result = db.table("tenants").select("*").eq("email", form_data.username).execute()
     if not result.data:
         raise HTTPException(status_code=401, detail="Invalid email or password")
-    
+
     tenant = result.data[0]
-    
-    if not verify_password(req.password, tenant.get("password_hash", "")):
+
+    if not verify_password(form_data.password, tenant.get("password_hash", "")):
         raise HTTPException(status_code=401, detail="Invalid email or password")
-    
+
     token = create_access_token({
         "sub": tenant["id"],
         "email": tenant["email"],
         "plan": tenant["plan"]
     })
-    
+
+    return {"access_token": token, "token_type": "bearer"}
+
+# --- JSON login (for frontend/app) ---
+@router.post("/login")
+def login(req: LoginRequest):
+    db = get_db()
+
+    result = db.table("tenants").select("*").eq("email", req.email).execute()
+    if not result.data:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    tenant = result.data[0]
+
+    if not verify_password(req.password, tenant.get("password_hash", "")):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    token = create_access_token({
+        "sub": tenant["id"],
+        "email": tenant["email"],
+        "plan": tenant["plan"]
+    })
+
     return {"access_token": token, "token_type": "bearer", "tenant_id": tenant["id"]}
 
 @router.get("/me")
