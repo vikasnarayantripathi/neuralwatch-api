@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.auth.routes import router as auth_router
 from app.cameras.routes import router as cameras_router
 from app.relay.routes import router as relay_router
+from app.motion.routes import router as motion_router
 import uvicorn
 
 app = FastAPI(
@@ -23,6 +24,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(cameras_router)
 app.include_router(relay_router)
+app.include_router(motion_router)
 
 @app.get("/")
 def root():
