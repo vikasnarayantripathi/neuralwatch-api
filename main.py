@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.auth.routes import router as auth_router
 from app.cameras.routes import router as cameras_router
+from app.relay.routes import router as relay_router
 import uvicorn
 
 app = FastAPI(
@@ -21,6 +22,7 @@ app.add_middleware(
 # Routers
 app.include_router(auth_router)
 app.include_router(cameras_router)
+app.include_router(relay_router)
 
 @app.get("/")
 def root():
