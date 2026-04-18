@@ -3,7 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.auth.routes import router as auth_router
 from app.cameras.routes import router as cameras_router
 from app.playback import router as playback_router
-from app.ingest import start_camera_stream, stop_camera_stream, get_active_streams
+from app.motion.routes import router as alerts_router
+from app.relay.routes import router as relay_router
 from app.motion import create_offline_alert
 from app.auth.utils import get_current_tenant
 from app.database import get_db
@@ -28,7 +29,8 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(cameras_router)
 app.include_router(playback_router)
-
+app.include_router(alerts_router)
+app.include_router(relay_router)
 
 # ── Core endpoints ─────────────────────────────────────────
 @app.get("/")
