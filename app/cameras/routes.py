@@ -12,6 +12,11 @@ import ipaddress
 from app.mediamtx import MediaMTXClient
 from app.crypto import encrypt, decrypt, build_rtsp_url, mask_rtsp_url
 from app.probe import probe_rtsp
+from app.ingest import (
+    start_camera_stream,
+    stop_camera_stream,
+    resolve_record_source,
+)
 
 router = APIRouter(prefix="/api/cameras", tags=["cameras"])
 
@@ -123,7 +128,8 @@ def add_camera(
         "rtsp_url":        req.rtsp_url,
         "brand":           req.brand,
         "relay_agent_id":  req.relay_agent_id,
-        "online":          False
+        "online":          False,
+        "recording_enabled": False
     }).execute()
     return {"message": "Camera added successfully", "camera_id": camera_id}
 
@@ -260,6 +266,7 @@ async def add_rtsp_camera(
         "room_id":             body.room_id,
         "has_ptz":             body.has_ptz,
         "connection_status":   "connecting",
+        "recording_enabled":   False,
         "is_active":           True,
     }).execute()
 
@@ -313,6 +320,7 @@ async def add_rtmp_camera(
         "has_ptz":           body.has_ptz,
         "has_audio":         body.has_audio,
         "connection_status": "provisioning",
+        "recording_enabled": False,
         "is_active":         True,
     }).execute()
 
@@ -379,6 +387,7 @@ async def add_qr_camera(
         "wifi_ssid_enc":      encrypt(body.wifi_ssid),
         "wifi_pass_enc":      encrypt(body.wifi_password),
         "connection_status":  "provisioning",
+        "recording_enabled":  False,
         "is_active":          True,
     }).execute()
 
@@ -471,4 +480,97 @@ async def get_push_config(
         "rtmp_url":   mtx.rtmp_push_url(stream_path) if mtx else "",
         "rtmps_url":  mtx.rtmps_push_url(stream_path) if mtx else "",
         "stream_key": camera.get("rtmp_push_key", ""),
+    }
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# CLOUD RECORDING — per-camera on/off toggle (plan-quota enforced)
+# ═════════════════════════════════════════════════════════════════════════════
+
+class RecordingToggle(BaseModel):
+    enabled: bool
+
+
+@router.post("/{camera_id}/recording")
+async def set_recording(
+    camera_id: str,
+    body: RecordingToggle,
+    current_user: dict = Depends(get_current_user)
+):
+    """Turn cloud recording on/off for one camera.
+
+    Enabling is capped by the tenant's plan: the number of cameras with
+    recording_enabled=True can never exceed tenant.camera_quota, so R2
+    storage cost is structurally bounded by plan revenue.
+    """
+    db = get_db()
+    tenant_id = current_user["sub"]
+
+    cam = db.table("cameras").select("*").eq(
+        "id", camera_id
+    ).eq("tenant_id", tenant_id).execute()
+    if not cam.data:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    camera = cam.data[0]
+
+    if not body.enabled:
+        db.table("cameras").update(
+            {"recording_enabled": False}
+        ).eq("id", camera_id).eq("tenant_id", tenant_id).execute()
+        await stop_camera_stream(camera_id)
+        return {
+            "ok": True,
+            "camera_id": camera_id,
+            "recording_enabled": False,
+        }
+
+    # ── Enabling: enforce plan quota ──────────────────────────────────────
+    tenant = db.table("tenants").select(
+        "camera_quota, plan"
+    ).eq("id", tenant_id).execute()
+    if not tenant.data:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    quota = tenant.data[0].get("camera_quota") or 0
+    plan = tenant.data[0].get("plan") or "current"
+
+    enabled_rows = db.table("cameras").select("id").eq(
+        "tenant_id", tenant_id
+    ).eq("recording_enabled", True).execute()
+    others_on = [
+        c for c in (enabled_rows.data or []) if c["id"] != camera_id
+    ]
+    if len(others_on) >= quota:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Your {plan} plan allows cloud recording on {quota} "
+                f"camera(s). Turn off recording on another camera or "
+                f"upgrade your plan to record more."
+            ),
+        )
+
+    source = resolve_record_source(camera)
+    if not source:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This camera has no recordable stream yet. Make sure it is "
+                "connected and streaming, then try again."
+            ),
+        )
+
+    db.table("cameras").update(
+        {"recording_enabled": True}
+    ).eq("id", camera_id).eq("tenant_id", tenant_id).execute()
+
+    await start_camera_stream(
+        camera_id=camera_id,
+        rtsp_url=source,
+        tenant_id=tenant_id,
+    )
+
+    return {
+        "ok": True,
+        "camera_id": camera_id,
+        "recording_enabled": True,
     }

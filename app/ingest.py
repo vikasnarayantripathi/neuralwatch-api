@@ -5,8 +5,38 @@ import uuid
 from datetime import datetime, timezone
 from app.storage import upload_segment
 from app.database import get_db
+from app.crypto import decrypt
 
 SEGMENT_DURATION = 10
+
+
+def resolve_record_source(camera: dict) -> str:
+    """Return a URL ffmpeg can pull to record this camera.
+
+    Order of preference:
+      1. decrypted rtsp_url_encrypted (RTSP-pull cameras added via add-rtsp)
+      2. plaintext rtsp_url / stream_url (cameras added via legacy add_camera)
+      3. MediaMTX HLS republish url (RTMP / QR push cameras have no pull URL,
+         so we record their republished stream off MediaMTX)
+    Returns "" if no usable source exists yet.
+    """
+    enc = camera.get("rtsp_url_encrypted")
+    if enc:
+        try:
+            url = decrypt(enc)
+            if url:
+                return url
+        except Exception as e:
+            print(f"[INGEST] decrypt rtsp_url failed for camera "
+                  f"{camera.get('id')}: {e}")
+    for key in ("rtsp_url", "stream_url"):
+        val = camera.get(key)
+        if val:
+            return val
+    hls = camera.get("hls_url")
+    if hls:
+        return hls
+    return ""
 
 async def start_stream_ingest(camera_id: str, rtsp_url: str, tenant_id: str):
     db = get_db()
@@ -23,9 +53,13 @@ async def start_stream_ingest(camera_id: str, rtsp_url: str, tenant_id: str):
         while True:
             segment_filename = f"seg_{segment_index:06d}.ts"
             segment_path = os.path.join(tmp_dir, segment_filename)
-            cmd = [
-                "ffmpeg", "-y",
-                "-rtsp_transport", "tcp",
+            cmd = ["ffmpeg", "-y"]
+            # -rtsp_transport is an RTSP-only demuxer option; passing it for
+            # an HLS/RTMP source makes ffmpeg error out, so only add it for
+            # genuine RTSP sources.
+            if rtsp_url.startswith("rtsp://") or rtsp_url.startswith("rtsps://"):
+                cmd += ["-rtsp_transport", "tcp"]
+            cmd += [
                 "-i", rtsp_url,
                 "-t", str(SEGMENT_DURATION),
                 "-c:v", "copy",
